@@ -1,0 +1,9 @@
+/target
+.DS_Store
+
+# Local Scrivener test projects and backups
+Just as Mortal Men/
+jamm/
+
+# Optional local scratch
+*.tmp

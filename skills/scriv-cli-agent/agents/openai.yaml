@@ -1,0 +1,4 @@
+version: 1
+display_name: Scriv CLI Agent
+short_description: Operate Scrivener projects safely with scriv CLI
+default_prompt: Use this skill when working with the scriv CLI, binder paths, metadata updates, sync/conflict handling, compile, and Scrivener package safety.
