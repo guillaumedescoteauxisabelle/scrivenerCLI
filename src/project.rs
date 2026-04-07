@@ -20,10 +20,11 @@ pub fn create_project(name: &str, dir: Option<PathBuf>, template: &str) -> Resul
     let root_dir = base_dir.join(name);
     let scriv_dir = root_dir.join(format!("{name}.scriv"));
     let mirror_dir = root_dir.join(format!("{name}.scriv-mirror"));
+    let data_dir = scriv_dir.join("Files/Data");
 
     fs::create_dir_all(&scriv_dir)?;
     fs::create_dir_all(&mirror_dir)?;
-    fs::create_dir_all(scriv_dir.join("Files/Data"))?;
+    fs::create_dir_all(&data_dir)?;
 
     let root_id = Uuid::new_v4();
     let mut docs = BTreeMap::new();
@@ -51,22 +52,18 @@ pub fn create_project(name: &str, dir: Option<PathBuf>, template: &str) -> Resul
         docs,
     };
 
-    save_project_data(
-        &ProjectHandle {
-            root_dir,
-            scriv_dir,
-            mirror_dir,
-        },
-        &data,
-    )?;
+    let handle = ProjectHandle {
+        root_dir: root_dir.clone(),
+        scriv_dir: scriv_dir.clone(),
+        mirror_dir: mirror_dir.clone(),
+        data_dir: data_dir.clone(),
+    };
 
-    write_minimal_scrivx(&data, &base_dir.join(name).join(format!("{name}.scriv")))?;
+    save_project_data(&handle, &data)?;
 
-    Ok(ProjectHandle {
-        root_dir: base_dir.join(name),
-        scriv_dir: base_dir.join(name).join(format!("{name}.scriv")),
-        mirror_dir: base_dir.join(name).join(format!("{name}.scriv-mirror")),
-    })
+    write_minimal_scrivx(&data, &scriv_dir)?;
+
+    Ok(handle)
 }
 
 pub fn open_project(explicit: Option<&Path>) -> Result<ProjectHandle> {
@@ -88,10 +85,12 @@ fn resolve_project_path(path: &Path) -> Result<ProjectHandle> {
             .file_stem()
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow!("invalid project name"))?;
+        let data_dir = resolve_data_dir(path);
         return Ok(ProjectHandle {
             root_dir: root_dir.clone(),
             scriv_dir: path.to_path_buf(),
             mirror_dir: root_dir.join(format!("{project_stem}.scriv-mirror")),
+            data_dir,
         });
     }
 
@@ -106,10 +105,12 @@ fn resolve_project_path(path: &Path) -> Result<ProjectHandle> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("Project")
                     .to_string();
+                let data_dir = resolve_data_dir(&p);
                 return Ok(ProjectHandle {
                     root_dir: path.to_path_buf(),
                     scriv_dir: p.clone(),
                     mirror_dir: path.join(format!("{stem}.scriv-mirror")),
+                    data_dir,
                 });
             }
         }
@@ -118,6 +119,18 @@ fn resolve_project_path(path: &Path) -> Result<ProjectHandle> {
     Err(anyhow!(
         "could not resolve project. pass --project <Project.scriv|project_root>"
     ))
+}
+
+fn resolve_data_dir(scriv_dir: &Path) -> PathBuf {
+    let files_data = scriv_dir.join("Files/Data");
+    if files_data.exists() {
+        return files_data;
+    }
+    let mobile_data = scriv_dir.join("Mobile/Data");
+    if mobile_data.exists() {
+        return mobile_data;
+    }
+    files_data
 }
 
 pub fn load_project_data(handle: &ProjectHandle) -> Result<ProjectData> {
@@ -273,9 +286,58 @@ fn import_from_scrivx(handle: &ProjectHandle) -> Result<ProjectData> {
         },
     );
 
+    let mut binder_items_found = false;
     if let Some(binder) = parsed.binder {
         for item in binder.items {
             import_item(handle, &mut docs, root_id, item);
+            binder_items_found = true;
+        }
+    }
+
+    if !binder_items_found {
+        if let Ok(entries) = fs::read_dir(&handle.data_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if entry.path().is_dir() {
+                    let uuid_str = entry.file_name().to_string_lossy().into_owned();
+                    if let Ok(id) = Uuid::parse_str(&uuid_str) {
+                        let synopsis = read_synopsis(handle, &id).unwrap_or_default();
+                        let title = synopsis
+                            .lines()
+                            .next()
+                            .unwrap_or(&uuid_str)
+                            .trim_start_matches("#")
+                            .trim()
+                            .chars()
+                            .take(64)
+                            .collect::<String>();
+                        let title = title.replace("/", "-").replace("\\", "-");
+                        let title = if title.is_empty() { uuid_str } else { title };
+
+                        let content = read_rtf_doc_text(handle, &id).unwrap_or_default();
+                        let notes = read_notes(handle, &id).unwrap_or_default();
+
+                        let node = DocNode {
+                            id,
+                            parent: Some(root_id),
+                            children: Vec::new(),
+                            title: title.clone(),
+                            path_hint: title,
+                            kind: DocKind::Text,
+                            content,
+                            meta: DocMeta {
+                                notes,
+                                synopsis,
+                                updated_at: Utc::now(),
+                                ..DocMeta::default()
+                            },
+                        };
+                        if let Some(root_node) = docs.get_mut(&root_id) {
+                            root_node.children.push(id);
+                        }
+                        docs.insert(id, node);
+                    }
+                }
+            }
         }
     }
 
@@ -346,8 +408,7 @@ fn import_item(
 fn read_rtf_doc_text(handle: &ProjectHandle, id: &Uuid) -> Result<String> {
     let folder = id.to_string().to_uppercase();
     let path = handle
-        .scriv_dir
-        .join("Files/Data")
+        .data_dir
         .join(folder)
         .join("content.rtf");
     if !path.exists() {
@@ -360,8 +421,7 @@ fn read_rtf_doc_text(handle: &ProjectHandle, id: &Uuid) -> Result<String> {
 fn read_notes(handle: &ProjectHandle, id: &Uuid) -> Result<String> {
     let folder = id.to_string().to_uppercase();
     let path = handle
-        .scriv_dir
-        .join("Files/Data")
+        .data_dir
         .join(folder)
         .join("notes.rtf");
     if !path.exists() {
@@ -374,8 +434,7 @@ fn read_notes(handle: &ProjectHandle, id: &Uuid) -> Result<String> {
 fn read_synopsis(handle: &ProjectHandle, id: &Uuid) -> Result<String> {
     let folder = id.to_string().to_uppercase();
     let path = handle
-        .scriv_dir
-        .join("Files/Data")
+        .data_dir
         .join(folder)
         .join("synopsis.txt");
     if !path.exists() {
@@ -452,8 +511,7 @@ fn write_native_data_files(handle: &ProjectHandle, data: &ProjectData) -> Result
         }
 
         let folder = handle
-            .scriv_dir
-            .join("Files/Data")
+            .data_dir
             .join(node.id.to_string().to_uppercase());
         fs::create_dir_all(&folder)?;
         sync_content_rtf_preserving_formatting(&folder.join("content.rtf"), &node.content)?;
@@ -483,7 +541,7 @@ fn write_native_data_files(handle: &ProjectHandle, data: &ProjectData) -> Result
 }
 
 fn prune_orphan_data_dirs(handle: &ProjectHandle, data: &ProjectData) -> Result<()> {
-    let data_root = handle.scriv_dir.join("Files/Data");
+    let data_root = &handle.data_dir;
     if !data_root.exists() {
         return Ok(());
     }
@@ -494,7 +552,7 @@ fn prune_orphan_data_dirs(handle: &ProjectHandle, data: &ProjectData) -> Result<
         .map(|id| id.to_string().to_uppercase())
         .collect();
 
-    for entry in fs::read_dir(&data_root)? {
+    for entry in fs::read_dir(data_root)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_dir() {
@@ -622,13 +680,13 @@ fn is_basic_rtf(rtf: &str) -> bool {
 }
 
 fn refresh_docs_checksum(handle: &ProjectHandle) -> Result<()> {
-    let data_root = handle.scriv_dir.join("Files/Data");
+    let data_root = &handle.data_dir;
     if !data_root.exists() {
         return Ok(());
     }
 
     let mut lines = Vec::new();
-    for entry in WalkDir::new(&data_root).follow_links(false) {
+    for entry in WalkDir::new(data_root).follow_links(false) {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
@@ -638,7 +696,7 @@ fn refresh_docs_checksum(handle: &ProjectHandle) -> Result<()> {
             continue;
         }
         let rel = path
-            .strip_prefix(&data_root)?
+            .strip_prefix(data_root)?
             .to_string_lossy()
             .replace('\\', "/");
         let hash = sha1_file(path)?;

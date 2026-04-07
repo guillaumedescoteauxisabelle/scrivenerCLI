@@ -11,6 +11,7 @@ pub struct ProjectHandle {
     pub root_dir: PathBuf,
     pub scriv_dir: PathBuf,
     pub mirror_dir: PathBuf,
+    pub data_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
